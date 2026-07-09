@@ -258,6 +258,17 @@ def plot_results(results, method, theme):
 # ──────────────────────────────────────────────
 # Session State Initialization
 # ──────────────────────────────────────────────
+def reset_analysis_state():
+    """Clear uploaded data and any derived analysis results."""
+    st.session_state.y_raw = None
+    st.session_state.df_raw = None
+    st.session_state.filename = None
+    st.session_state.results = None
+    st.session_state.metrics_df = None
+    st.session_state.global_stats = None
+    st.session_state.glossary_df = None
+
+
 defaults = {
     "y_raw": None,
     "df_raw": None,
@@ -292,7 +303,12 @@ with st.sidebar:
         label_visibility="collapsed"
     )
 
-    if uploaded_file is not None and uploaded_file.name != st.session_state.filename:
+    if uploaded_file is None:
+        if st.session_state.filename is not None or st.session_state.y_raw is not None:
+            reset_analysis_state()
+            st.session_state.theme = st.session_state.get("theme", "Light")
+            st.info("Upload cleared. No file is currently loaded.")
+    elif uploaded_file.name != st.session_state.filename:
         try:
             df = pd.read_csv(uploaded_file, sep=None, engine="python")
             y_raw = df.iloc[:, -1].values.astype(float)
@@ -301,6 +317,8 @@ with st.sidebar:
             st.session_state.filename = uploaded_file.name
             st.session_state.results = None
             st.session_state.metrics_df = None
+            st.session_state.global_stats = None
+            st.session_state.glossary_df = None
             st.success(f"Loaded: {uploaded_file.name} ({len(y_raw)} samples)")
         except Exception as e:
             st.error(f"Failed to load file: {e}")
