@@ -262,6 +262,13 @@ def reset_analysis_state():
     st.session_state.glossary_df = None
     st.session_state.baseline = None
     st.session_state.dff0 = None
+    st.session_state.last_analyzed_params = None
+    st.session_state.analyzed_trace_mode = "Delta F / F0"
+    st.session_state.analyzed_detection_method = "Hybrid (Smooth + Refine)"
+    st.session_state.fig_overview = None
+    st.session_state.chart_overview = None
+    st.session_state.last_rendered_theme = None
+    st.session_state.last_rendered_engine = None
 
 defaults = {
     "y_raw": None,
@@ -276,6 +283,13 @@ defaults = {
     "glossary_df": None,
     "baseline": None,
     "dff0": None,
+    "last_analyzed_params": None,
+    "analyzed_trace_mode": "Delta F / F0",
+    "analyzed_detection_method": "Hybrid (Smooth + Refine)",
+    "fig_overview": None,
+    "chart_overview": None,
+    "last_rendered_theme": None,
+    "last_rendered_engine": None,
     "theme": "Light",
     "viz_engine": "Matplotlib (High-DPI)",
 }
@@ -288,7 +302,7 @@ for k, v in defaults.items():
 # ──────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🔬 Calcium Peak Analyzer")
-    st.caption("v2.5 PRO • Scientific Signal Suite")
+    st.caption("v1 PRO • Scientific Signal Suite")
 
     # 1. Data Input Expander
     with st.expander("📁 Data Source & Input", expanded=True):
@@ -307,6 +321,9 @@ with st.sidebar:
                 st.session_state.metrics_df = None
                 st.session_state.global_stats = None
                 st.session_state.glossary_df = None
+                st.session_state.last_analyzed_params = None
+                st.session_state.fig_overview = None
+                st.session_state.chart_overview = None
                 st.success("Loaded Synthetic Calcium Transient Dataset!")
 
         else:
@@ -333,6 +350,9 @@ with st.sidebar:
                     st.session_state.metrics_df = None
                     st.session_state.global_stats = None
                     st.session_state.glossary_df = None
+                    st.session_state.last_analyzed_params = None
+                    st.session_state.fig_overview = None
+                    st.session_state.chart_overview = None
                     st.success(f"Loaded: {uploaded_file.name}")
                 except Exception as e:
                     st.error(f"Failed to parse CSV: {e}")
@@ -353,7 +373,7 @@ with st.sidebar:
             ["Rolling Percentile", "Local Minimum", "Constant Minimum"],
             index=0
         )
-        base_window = st.slider("Baseline Window (frames)", 10, 500, 100, step=10)
+        base_window = st.slider("Baseline Window (frames)", 10, 1000, 400, step=10)
         trace_mode = st.radio("Display Trace Mode", ["Delta F / F0", "Raw Intensity F(t)"], horizontal=True)
 
     # 3. Detection Algorithm & Tuning
@@ -367,7 +387,7 @@ with st.sidebar:
 
         col_p1, col_p2 = st.columns(2)
         with col_p1:
-            prominence = st.number_input("Prominence", min_value=0.001, max_value=1000.0, value=0.03, step=0.005, format="%.3f")
+            prominence = st.number_input("Prominence", min_value=0.001, max_value=1000.0, value=0.10, step=0.005, format="%.3f")
         with col_p2:
             min_distance = st.number_input("Min Dist (frames)", min_value=1, max_value=2000, value=50, step=5)
 
@@ -385,10 +405,14 @@ with st.sidebar:
         viz_engine = st.radio("Plotting Engine", ["Matplotlib (High-DPI)", "Altair (Interactive Zoom)"])
         st.session_state.viz_engine = viz_engine
 
-    # Action Button
+    current_params = (base_method, base_window, trace_mode, method, prominence, min_distance, smooth_window, dt, st.session_state.current_roi)
+    is_params_changed = (st.session_state.results is not None) and (st.session_state.last_analyzed_params != current_params)
+
     st.markdown("<br>", unsafe_allow_html=True)
-    run_analysis = st.button("🚀 Run Signal Analysis", type="primary", width="stretch",
-                             disabled=st.session_state.y_raw is None)
+
+    # Dynamic button label based on parameter modification state (Zero Layout Shift)
+    button_label = "🔄 Apply Changed Parameters" if is_params_changed else "🚀 Re-Run Signal Analysis"
+    run_analysis = st.button(button_label, type="primary", width="stretch", disabled=st.session_state.y_raw is None)
 
     if run_analysis and st.session_state.y_raw is not None:
         with st.spinner("Processing signal transients..."):
@@ -412,9 +436,14 @@ with st.sidebar:
             st.session_state.metrics_df = metrics_df
             st.session_state.global_stats = global_stats
             st.session_state.glossary_df = CalciumSignalProcessor.get_glossary()
-            st.session_state.trace_mode = trace_mode
+            st.session_state.analyzed_trace_mode = trace_mode
+            st.session_state.analyzed_detection_method = method
+            st.session_state.last_analyzed_params = current_params
+            st.session_state.fig_overview = None  # Force figure re-render for new analysis
+            st.session_state.chart_overview = None
             
         st.toast("Peak Analysis Completed!", icon="✅")
+        st.rerun()
 
     # Export Section
     st.markdown("<br>", unsafe_allow_html=True)
@@ -456,10 +485,12 @@ with st.sidebar:
 # ──────────────────────────────────────────────
 
 st.title("🔬 Calcium Signal Analysis Suite")
-st.caption("Automated peak detection, dynamic baseline estimation, sub-sample transient kinetics, and per-peak visual diagnostics.")
+
+# Permanent reserved status slot (Zero Layout Shift)
+status_slot = st.empty()
 
 if st.session_state.y_raw is None:
-    st.info("👈 **Getting Started:** Select **Upload CSV File** or click **Load Sample Dataset** in the sidebar to begin.")
+    status_slot.caption("👈 Select **Upload CSV File** or click **Load Sample Dataset** in the sidebar to begin.")
     
     with st.container(border=True):
         st.subheader("💡 Key Capabilities")
@@ -471,6 +502,16 @@ if st.session_state.y_raw is None:
         """)
 
 else:
+    # Evaluate parameter modification state
+    current_params = (base_method, base_window, trace_mode, method, prominence, min_distance, smooth_window, dt, st.session_state.current_roi)
+    is_params_changed = (st.session_state.results is not None) and (st.session_state.last_analyzed_params != current_params)
+
+    # In-place status update inside reserved slot (Yellow Warning Background)
+    if is_params_changed:
+        status_slot.warning("⚠️ **Pending Parameter Changes:** You modified analysis settings in the sidebar. Click **🔄 Apply Changed Parameters** in the sidebar to update peak detection, metrics, and all charts.")
+    else:
+        status_slot.caption("🟢 **Status:** Peak detection and metrics are up-to-date with current settings.")
+
     if st.session_state.results is None:
         with st.spinner("Initial analysis running..."):
             y_raw = st.session_state.y_raw
@@ -493,7 +534,11 @@ else:
             st.session_state.metrics_df = metrics_df
             st.session_state.global_stats = global_stats
             st.session_state.glossary_df = CalciumSignalProcessor.get_glossary()
-            st.session_state.trace_mode = trace_mode
+            st.session_state.analyzed_trace_mode = trace_mode
+            st.session_state.analyzed_detection_method = method
+            st.session_state.last_analyzed_params = current_params
+            st.session_state.fig_overview = None
+            st.session_state.chart_overview = None
 
     gs = st.session_state.global_stats
     if gs is not None:
@@ -532,18 +577,30 @@ else:
         
         if st.session_state.results is not None:
             if st.session_state.viz_engine == "Altair (Interactive Zoom)":
-                chart = plot_altair(st.session_state.results, st.session_state.dff0, st.session_state.trace_mode, method)
-                st.altair_chart(chart, width="stretch")
-            else:
-                fig = plot_matplotlib(
-                    st.session_state.results, st.session_state.dff0, st.session_state.baseline, 
-                    st.session_state.trace_mode, method, st.session_state.theme,
-                    current_roi=st.session_state.current_roi or "Signal"
-                )
-                st.pyplot(fig, width="stretch")
-                plt.close(fig)
+                if st.session_state.chart_overview is None or st.session_state.last_rendered_engine != st.session_state.viz_engine:
+                    st.session_state.chart_overview = plot_altair(
+                        st.session_state.results, st.session_state.dff0, 
+                        st.session_state.analyzed_trace_mode, st.session_state.analyzed_detection_method
+                    )
+                    st.session_state.last_rendered_engine = st.session_state.viz_engine
 
-        st.caption("💡 **Tip:** Adjust algorithm parameters in the sidebar and click **Run Signal Analysis** to update peak locations.")
+                st.altair_chart(st.session_state.chart_overview, width="stretch")
+            else:
+                if (st.session_state.fig_overview is None or 
+                    st.session_state.last_rendered_theme != st.session_state.theme or 
+                    st.session_state.last_rendered_engine != st.session_state.viz_engine):
+                    
+                    st.session_state.fig_overview = plot_matplotlib(
+                        st.session_state.results, st.session_state.dff0, st.session_state.baseline, 
+                        st.session_state.analyzed_trace_mode, st.session_state.analyzed_detection_method, st.session_state.theme,
+                        current_roi=st.session_state.current_roi or "Signal"
+                    )
+                    st.session_state.last_rendered_theme = st.session_state.theme
+                    st.session_state.last_rendered_engine = st.session_state.viz_engine
+
+                st.pyplot(st.session_state.fig_overview, width="stretch")
+
+        st.caption("💡 **Tip:** Adjust algorithm parameters in the sidebar and click **Apply Parameter Changes** to update peak locations.")
 
     # TAB 2
     with tab2:
