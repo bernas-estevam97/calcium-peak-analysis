@@ -1,6 +1,6 @@
-# streamlit_peak_analyzer_vibe.py
+# streamlit_peak_analyzer.py
 """
-Calcium Signal Peak Analyzer (Vibe Edition Pro)
+Calcium Signal Peak Analyzer (Pro)
 Professional, interactive Streamlit application for calcium transient signal analysis,
 peak detection, dynamic baseline estimation, metric extraction, and single-peak inspection.
 
@@ -455,7 +455,7 @@ with st.sidebar:
 # Main Application Dashboard
 # ──────────────────────────────────────────────
 
-st.title("🔬 Calcium Signal Analysis Suite (Vibe Edition)")
+st.title("🔬 Calcium Signal Analysis Suite")
 st.caption("Automated peak detection, dynamic baseline estimation, sub-sample transient kinetics, and per-peak visual diagnostics.")
 
 if st.session_state.y_raw is None:
