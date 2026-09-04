@@ -714,36 +714,110 @@ else:
 
     # TAB 4
     with tab4:
-        st.subheader("📖 Algorithm & Mathematical Documentation")
+        st.subheader("📖 Comprehensive Parameter Guide & Scientific Documentation")
         
         st.markdown(r"""
-        ### Peak Detection Algorithms
-
-        #### 1. Dynamic Baseline Estimation ($F_0$)
-        - **Rolling Percentile:** Computes moving quantile over sliding baseline window to track resting fluorescence.
-        - **Local Minimum / Constant Minimum:** Tracks lower envelopes for signal baseline subtraction.
-
-        #### 2. Hybrid Peak Detection (Savitzky-Golay Smooth + Raw Refinement)
-        1. **Noise Filtering:** Applies a 3rd-order Savitzky-Golay polynomial filter over a local window of length $W$.
-        2. **Candidate Peak Identification:** Detects peaks on the smoothed curve using minimum prominence $P$ and distance $D$.
-        3. **Raw Peak Refinement:** Pinpoints maximum raw intensity position around candidates.
-
-        ---
-
-        ### Kinetic Metrics Glossary & Equations
-
-        - **Fractional Fluorescence ($\Delta F / F_0$):**
-          $$\frac{\Delta F}{F_0} = \frac{F(t) - F_0(t)}{F_0(t)}$$
-
-        - **Sub-Sample Rise Time ($T_{10-90}$):**
-          Linear interpolation for sub-frame duration from $10\%$ to $90\%$ of peak amplitude.
-
-        - **Single-Exponential Decay Constant ($\tau_{\text{decay}}$):**
-          Non-linear curve fit: $F(t) = A \cdot e^{-t/\tau} + C$.
-
-        - **Rhythmicity Index ($CV_{\text{IEI}}$):**
-          Coefficient of variation of Inter-Event Intervals ($SD / \text{Mean}$).
+        This reference guide explains every analysis parameter, how adjusting it impacts peak detection, 
+        and the mathematical formulas used by the literature-standard calculation engine.
         """)
 
-        with st.expander("📖 View Full Metrics Glossary Table"):
+        # Section 1: Parameter Tuning Guide
+        with st.expander("🎛️ Complete Parameter Tuning Guide (What & How to Change)", expanded=True):
+            st.markdown(r"""
+            ### 1. Baseline Estimation Parameters
+
+            #### **Baseline $F_0$ Method**
+            - **What it does:** Selects the algorithm used to estimate local resting fluorescence $F_0(t)$ across your time-series.
+            - **Options:**
+              - `Rolling Percentile` **(Recommended):** Calculates a moving 10th percentile over a sliding window. Ignores upward transient spikes and tracks true baseline drift.
+              - `Local Minimum:` Tracks the absolute minimum values in a sliding window. Highly sensitive to noise dips.
+              - `Constant Minimum:` Sets $F_0$ as a single fixed baseline across the entire recording. Assumes zero baseline drift or photobleaching.
+            - **Impact:** `Rolling Percentile` prevents baseline elevation caused by high-frequency firing bursts.
+
+            #### **Baseline Window (frames)** ($W_{\text{base}}$)
+            - **What it does:** The width of the sliding temporal window (in frames) over which resting fluorescence $F_0(t)$ is computed.
+            - **Formula:** $F_0(t) = \text{Percentile}_{10}\left(F\left[t - \frac{W}{2} : t + \frac{W}{2}\right]\right)$
+            - **How tuning affects detection:**
+              - ⚠️ **Too Small (< 100 frames at 100 FPS / < 1s):** The baseline window climbs into transient peaks, artificially raising $F_0(t)$ and squishing peak amplitude $\Delta F / F_0$.
+              - ✅ **Optimal (300 – 600 frames at 100 FPS / 3s – 6s):** Smoothly tracks slow photobleaching without climbing into calcium events.
+              - ⚠️ **Too Large (> 1000 frames):** Lags behind fast baseline drift or illumination changes.
+
+            #### **Display Trace Mode**
+            - **What it does:** Toggles between fractional fluorescence change $\frac{\Delta F}{F_0}(t)$ and raw fluorescence $F(t)$.
+            - **Formula:** $\frac{\Delta F}{F_0}(t) = \frac{F(t) - F_0(t)}{F_0(t)}$
+            - **Impact:** $\Delta F / F_0$ normalizes for dye loading variations, making transient amplitudes directly comparable across different ROIs.
+
+            ---
+
+            ### 2. Peak Detection & Filtering Parameters
+
+            #### **Detection Method**
+            - **What it does:** Determines whether high-frequency noise smoothing is applied before identifying candidate peaks.
+            - **Options:**
+              - `Hybrid (Smooth + Refine)` **(Recommended):** Applies Savitzky-Golay polynomial filtering to detect candidate peak locations, then pinpoints raw peak amplitudes.
+              - `Direct (Raw):` Searches for peaks directly on the raw un-smoothed signal.
+            - **Impact:** `Hybrid` prevents high-frequency noise ripples from triggering false positive peak detections.
+
+            #### **Prominence** ($P$)
+            - **What it does:** The minimum vertical height a peak must extend above its surrounding baseline valleys.
+            - **Formula:** $P_i = y_{\text{peak}} - \max\left(\min(y_{\text{left\_valley}}), \min(y_{\text{right\_valley}})\right)$
+            - **How tuning affects detection:**
+              - ⚠️ **Too Low (0.01 – 0.03 on $\Delta F/F_0$):** Detects minor noise ripples as false positive peaks.
+              - ✅ **Optimal (0.08 – 0.12 on $\Delta F/F_0$):** Isolates genuine, high-confidence biological calcium transients.
+              - ⚠️ **Too High (> 0.25):** Misses smaller, valid calcium events.
+
+            #### **Min Distance (frames)** ($D_{\text{min}}$)
+            - **What it does:** The minimum temporal spacing (in frames) required between consecutive peak detections.
+            - **Impact:** Prevents double-counting multi-peaked noise ripples or split peaks within a single calcium event. Set $D_{\text{min}}$ slightly smaller than your shortest expected inter-event interval.
+
+            #### **SG Window (odd integer)** ($W_{\text{SG}}$)
+            - **What it does:** The frame length of the Savitzky-Golay smoothing polynomial filter (Hybrid method).
+            - **Impact:** Higher values ($15–25$) provide stronger noise smoothing but may flatten fast peak spikes; lower values ($5–9$) preserve sharp transients.
+
+            #### **Time Step dt (ms/frame)** ($\Delta t$)
+            - **What it does:** The acquisition sampling interval in milliseconds per frame ($1 / \text{FPS} \times 1000$).
+            - **Impact:** Converts frame indices to real-world units ($\text{ms}$, $\text{seconds}$, $\text{Hz}$). Used to compute transient duration, rise time, decay time constant $\tau$, and area under curve (AUC).
+            """)
+
+        # Section 2: Mathematical Formulas & Equations
+        with st.expander("📐 Mathematical Formulas & Algorithm Equations", expanded=False):
+            st.markdown(r"""
+            ### 1. Savitzky-Golay Noise Smoothing
+            Fits a local 3rd-degree polynomial $y(t) = a_0 + a_1 t + a_2 t^2 + a_3 t^3$ over a sliding window $W_{\text{SG}}$:
+            $$S(t) = \sum_{i=-m}^{m} c_i \cdot F(t+i)$$
+            where $c_i$ are convolution coefficients that preserve higher moments (peak height and width) better than simple moving averages.
+
+            ---
+
+            ### 2. Sub-Sample Linear Interpolation ($T_{10-90}$ Rise Time)
+            To achieve sub-frame accuracy for fast transients, $10\%$ ($y_{10}$) and $90\%$ ($y_{90}$) amplitude threshold crossing times ($t_{10}$ and $t_{90}$) are computed via linear interpolation:
+            $$t_{10} = t_1 + \frac{(y_{10} - y_1)(t_2 - t_1)}{y_2 - y_1}$$
+            $$\text{Rise Time } T_{10-90} = t_{90} - t_{10}$$
+
+            ---
+
+            ### 3. Single-Exponential Decay Time Constant ($\tau_{\text{decay}}$)
+            Fits an exponential decay curve to the post-peak signal segment:
+            $$y(t) = A \cdot e^{-\frac{t - t_{\text{peak}}}{\tau}} + C$$
+            **Neurophysiology Fallback:** If non-linear curve fitting fails due to signal noise, $\tau$ is robustly calculated from the half-decay time $T_{50}$:
+            $$\tau_{\text{decay}} = \frac{T_{50}}{\ln(2)} \approx 1.4427 \times T_{50}$$
+
+            ---
+
+            ### 4. Area Under Curve (AUC)
+            Trapezoidal integration of net transient amplitude from onset $t_{\text{onset}}$ to offset $t_{\text{offset}}$:
+            $$\text{AUC} = \int_{t_{\text{onset}}}^{t_{\text{offset}}} \max\left(0, \frac{\Delta F}{F_0}(t) - y_{\text{base}}\right) dt$$
+
+            ---
+
+            ### 5. Rhythmicity Index ($CV_{\text{IEI}}$)
+            Coefficient of Variation of Inter-Event Intervals ($\text{IEI} = t_{\text{peak}_{i+1}} - t_{\text{peak}_i}$):
+            $$CV_{\text{IEI}} = \frac{\text{SD}(\text{IEI})}{\text{Mean}(\text{IEI})}$$
+            - $CV \to 0$: Perfectly regular, metronomic firing.
+            - $CV \approx 1$: Stochastic Poisson process.
+            - $CV > 1$: Irregular / bursting activity patterns.
+            """)
+
+        # Section 3: Glossary Table
+        with st.expander("📖 Metrics Glossary Table", expanded=False):
             st.dataframe(st.session_state.glossary_df, width="stretch", hide_index=True)

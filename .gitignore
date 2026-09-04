@@ -168,3 +168,4 @@ secrets.toml
 
 # Project specific
 requirements_full.txt
+PROJECT_STATE.md
