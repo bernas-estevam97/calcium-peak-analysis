@@ -76,14 +76,111 @@ class CalciumSignalProcessor:
         return df, time_col, signal_cols
 
     @staticmethod
+    def estimate_signal_noise(y_signal):
+        """
+        Estimates the high-frequency white noise standard deviation (sigma) of a signal
+        using the Median Absolute Deviation (MAD) of successive frame differences:
+            sigma = median(|diff - median(diff)|) / (0.6745 * sqrt(2))
+        This robust estimator is resistant to large transient peaks and slow baseline drift.
+        """
+        if len(y_signal) < 2:
+            return 0.01
+        diffs = np.diff(y_signal)
+        mad = float(np.median(np.abs(diffs - np.median(diffs))))
+        if mad > 0:
+            sigma = mad / (0.6745 * np.sqrt(2.0))
+        else:
+            sigma = float(np.std(y_signal) / 5.0)
+        return max(float(sigma), 1e-5)
+
+    @staticmethod
     def estimate_noise_std(y_raw):
         """Estimate baseline noise standard deviation using median absolute deviation of diffs."""
-        if len(y_raw) < 2:
-            return 1.0
-        diffs = np.diff(y_raw)
-        mad = np.median(np.abs(diffs - np.median(diffs)))
-        sigma = mad / 0.6745 if mad > 0 else np.std(y_raw) / 5.0
-        return max(float(sigma), 1e-6)
+        return CalciumSignalProcessor.estimate_signal_noise(y_raw)
+
+    @classmethod
+    def auto_tune_parameters(cls, y_raw, fps=100.0, profile="Cardiomyocytes", trace_mode="Delta F / F0"):
+        """
+        Automatically tunes and estimates peak detection parameters based on camera acquisition 
+        rate (FPS), biological cell profile, and empirical signal noise floor.
+        
+        Profiles:
+        - "Cardiomyocytes": Fast, rhythmic cardiac contractions (~0.5-1.5s transients, ~350ms refractory)
+        - "Neurons (Fast Transients)": Fast somatic action potential calcium spikes (~150-400ms transients)
+        - "Astrocytes (Slow Waves)": Long multi-second propagating calcium waves (~3-10s duration)
+        - "Auto-Detect (General)": Balanced detection parameters scaled to acquisition frame rate
+        
+        Returns:
+            dict: Recommended parameter settings {base_method, base_window, trace_mode, method, 
+                  prominence, min_distance, smooth_window, dt, noise_sigma, profile}
+        """
+        n = len(y_raw)
+        fps = float(fps) if fps and fps > 0 else 100.0
+        dt = 1000.0 / fps
+
+        profile_key = profile.lower()
+        if "neuron" in profile_key:
+            target_base_sec = 2.0
+            target_refr_sec = 0.15
+            target_sg_ms = 70.0
+            prom_multiplier = 3.5
+            min_prom = 0.08
+        elif "astrocyte" in profile_key or "slow" in profile_key:
+            target_base_sec = 8.0
+            target_refr_sec = 1.2
+            target_sg_ms = 250.0
+            prom_multiplier = 2.5
+            min_prom = 0.04
+        else:
+            # Cardiomyocytes and Default Auto-Detect
+            target_base_sec = 3.5
+            target_refr_sec = 0.35
+            target_sg_ms = 110.0
+            prom_multiplier = 3.0
+            min_prom = 0.08
+
+        # 1. Compute Base Window (frames, rounded to nearest 10 for slider compatibility)
+        base_window = int(round(target_base_sec * fps))
+        base_window = int(round(base_window / 10.0) * 10)
+        max_win = max(20, min(1000, (n // 20) * 10)) if n > 40 else 50
+        base_window = max(20, min(base_window, max_win))
+
+        # 2. Compute Preliminary Baseline to assess dF/F0 noise
+        baseline = cls.compute_baseline(y_raw, method="Rolling Percentile", window_pts=base_window)
+        dff0 = cls.compute_dff0(y_raw, baseline)
+
+        # 3. Estimate Noise Floor
+        if trace_mode == "Delta F / F0":
+            sigma = cls.estimate_signal_noise(dff0)
+            prominence = max(min_prom, round(prom_multiplier * sigma, 3))
+        else:
+            sigma = cls.estimate_signal_noise(y_raw)
+            med_f0 = float(np.median(baseline)) if len(baseline) > 0 else 100.0
+            prominence = max(min_prom * med_f0, round(prom_multiplier * sigma, 3))
+
+        # 4. Compute Min Distance (frames)
+        min_distance = int(round(target_refr_sec * fps))
+        min_distance = max(5, min(min_distance, max(10, n // 4)))
+
+        # 5. Compute Savitzky-Golay Window (odd integer)
+        sg_raw = int(round((target_sg_ms / 1000.0) * fps))
+        if sg_raw % 2 == 0:
+            sg_raw += 1
+        smooth_window = max(5, min(51, sg_raw))
+
+        return {
+            "fps": round(fps, 1),
+            "dt": round(dt, 2),
+            "base_method": "Rolling Percentile",
+            "base_window": int(base_window),
+            "trace_mode": trace_mode,
+            "method": "Hybrid (Smooth + Refine)",
+            "prominence": float(prominence),
+            "min_distance": int(min_distance),
+            "smooth_window": int(smooth_window),
+            "noise_sigma": round(sigma, 4),
+            "profile": profile,
+        }
 
     @staticmethod
     def compute_baseline(y_raw, method="Rolling Percentile", window_pts=100, quantile=0.15):

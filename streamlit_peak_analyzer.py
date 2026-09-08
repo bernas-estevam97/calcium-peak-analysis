@@ -26,6 +26,11 @@ src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
+import importlib
+import calcium_peak_analyzer.core.calcium_processor as _cp_mod
+if not hasattr(_cp_mod.CalciumSignalProcessor, "auto_tune_parameters"):
+    _cp_mod = importlib.reload(_cp_mod)
+
 from calcium_peak_analyzer.core.calcium_processor import CalciumSignalProcessor
 
 # ──────────────────────────────────────────────
@@ -660,9 +665,11 @@ def reset_analysis_state():
     st.session_state.analyzed_trace_mode = "Delta F / F0"
     st.session_state.analyzed_detection_method = "Hybrid (Smooth + Refine)"
     st.session_state.fig_overview = None
+    st.session_state.fig_overview_bytes = None
     st.session_state.chart_overview = None
     st.session_state.last_rendered_theme = None
     st.session_state.last_rendered_engine = None
+    st.session_state.auto_tune_info = None
 
 defaults = {
     "y_raw": None,
@@ -681,11 +688,24 @@ defaults = {
     "analyzed_trace_mode": "Delta F / F0",
     "analyzed_detection_method": "Hybrid (Smooth + Refine)",
     "fig_overview": None,
+    "fig_overview_bytes": None,
     "chart_overview": None,
     "last_rendered_theme": None,
     "last_rendered_engine": None,
     "theme": "Light",
     "viz_engine": "Matplotlib (High-DPI)",
+    # Parameter state defaults
+    "param_base_method": "Rolling Percentile",
+    "param_base_window": 400,
+    "param_trace_mode": "Delta F / F0",
+    "param_method": "Hybrid (Smooth + Refine)",
+    "param_prominence": 0.10,
+    "param_min_distance": 50,
+    "param_smooth_window": 11,
+    "param_dt": 10.0,
+    "param_fps": 100.0,
+    "param_profile": "Cardiomyocytes",
+    "auto_tune_info": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -711,12 +731,16 @@ with st.sidebar:
                 st.session_state.current_roi = "Calcium_Signal"
                 st.session_state.time_col = "Time_ms"
                 st.session_state.filename = "Synthetic_Calcium_Transients.csv"
+                st.session_state.param_fps = 100.0
+                st.session_state.param_dt = 10.0
+                st.session_state.auto_tune_info = None
                 st.session_state.results = None
                 st.session_state.metrics_df = None
                 st.session_state.global_stats = None
                 st.session_state.glossary_df = None
                 st.session_state.last_analyzed_params = None
                 st.session_state.fig_overview = None
+                st.session_state.fig_overview_bytes = None
                 st.session_state.chart_overview = None
                 st.success("Loaded Synthetic Calcium Transient Dataset!")
 
@@ -746,7 +770,29 @@ with st.sidebar:
                     st.session_state.glossary_df = None
                     st.session_state.last_analyzed_params = None
                     st.session_state.fig_overview = None
+                    st.session_state.fig_overview_bytes = None
                     st.session_state.chart_overview = None
+                    st.session_state.auto_tune_info = None
+
+                    # Auto-detect FPS and dt if time column is available
+                    if time_col is not None:
+                        try:
+                            t_arr = df[time_col].dropna().values
+                            if len(t_arr) > 2:
+                                diffs = np.diff(t_arr)
+                                diffs_pos = diffs[diffs > 0]
+                                if len(diffs_pos) > 0:
+                                    med_diff = float(np.median(diffs_pos))
+                                    if med_diff > 0:
+                                        if med_diff < 0.5:  # Time in seconds
+                                            st.session_state.param_fps = float(round(1.0 / med_diff, 1))
+                                            st.session_state.param_dt = float(round(med_diff * 1000.0, 2))
+                                        else:  # Time in milliseconds
+                                            st.session_state.param_fps = float(round(1000.0 / med_diff, 1))
+                                            st.session_state.param_dt = float(round(med_diff, 2))
+                        except Exception:
+                            pass
+
                     st.success(f"Loaded: {uploaded_file.name}")
                 except Exception as e:
                     st.error(f"Failed to parse CSV: {e}")
@@ -760,39 +806,153 @@ with st.sidebar:
             st.caption(f"Active File: **{st.session_state.filename}**")
             st.caption(f"Total Samples: **{len(st.session_state.y_raw):,}**")
 
-    # 2. Baseline & Method Expander
+    # 2. Quick Presets & Auto-Tuning Expander (Optional)
+    with st.expander("🪄 Quick Presets & Auto-Tuning (Optional)", expanded=False):
+        # Client-side instantaneous toggle: 0ms lag, zero server rerun, no layout shift or caption flickering
+        st.markdown("""
+        <details style="margin-bottom: 12px; background: rgba(15, 118, 110, 0.06); border: 1px solid rgba(15, 118, 110, 0.2); border-radius: 6px; padding: 8px 12px; cursor: pointer;">
+            <summary style="font-weight: 900; font-size: 12.5px; color: #0f766e; user-select: none;">
+                ❓ How does Auto-Tuning work? (Click to view/hide)
+            </summary>
+            <div style="margin-top: 8px; font-size: 12px; line-height: 1.5; color: inherit;">
+                💡 <strong>Optional Assistant:</strong> If you are unsure how to manually configure 
+                the Baseline Window, Prominence, or Distance below, this tool automatically calculates 
+                recommended settings based on your camera frame rate and biological cell type.<br><br>
+                <em>If you prefer to set your parameters manually, you can ignore this section 
+                and tune them directly in the Baseline and Detection sections below.</em>
+            </div>
+        </details>
+        """, unsafe_allow_html=True)
+
+        col_fps1, col_fps2 = st.columns(2)
+        with col_fps1:
+            user_fps = st.number_input(
+                "Camera FPS (Hz)",
+                min_value=0.5,
+                max_value=2000.0,
+                key="param_fps",
+                step=5.0,
+                format="%.1f",
+                help="Frames per second of acquisition. Used to translate physiological time into frames."
+            )
+        with col_fps2:
+            cell_profile = st.selectbox(
+                "Biological Profile",
+                [
+                    "Cardiomyocytes",
+                    "Neurons (Fast Transients)",
+                    "Astrocytes (Slow Waves)",
+                    "Auto-Detect (General)"
+                ],
+                key="param_profile",
+                help="Biological preparation to calibrate expected transient duration and refractory gaps."
+            )
+
+        with st.container():
+            auto_tune_btn = st.button("🪄 Auto-Estimate & Apply Parameters", type="primary", width="stretch", disabled=st.session_state.y_raw is None)
+            st.caption("*(Optional: Click above only if you want the app to auto-fill the sliders and parameters below)*")
+
+        if auto_tune_btn and st.session_state.y_raw is not None:
+            y_raw_tune = st.session_state.y_raw
+            tune_res = CalciumSignalProcessor.auto_tune_parameters(
+                y_raw_tune,
+                fps=st.session_state.param_fps,
+                profile=st.session_state.param_profile,
+                trace_mode=st.session_state.param_trace_mode
+            )
+            st.session_state.param_base_method = tune_res["base_method"]
+            st.session_state.param_base_window = tune_res["base_window"]
+            st.session_state.param_method = tune_res["method"]
+            st.session_state.param_prominence = tune_res["prominence"]
+            st.session_state.param_min_distance = tune_res["min_distance"]
+            st.session_state.param_smooth_window = tune_res["smooth_window"]
+            st.session_state.param_dt = tune_res["dt"]
+            st.session_state.auto_tune_info = tune_res
+
+            # Re-run peak detection and analysis immediately
+            baseline_t = CalciumSignalProcessor.compute_baseline(y_raw_tune, method=tune_res["base_method"], window_pts=tune_res["base_window"])
+            dff0_t = CalciumSignalProcessor.compute_dff0(y_raw_tune, baseline_t)
+            y_analysis_t = dff0_t if tune_res["trace_mode"] == "Delta F / F0" else y_raw_tune
+            results_t = CalciumSignalProcessor.detect_peaks(
+                y_analysis_t, tune_res["dt"], method=tune_res["method"],
+                prominence=tune_res["prominence"], min_distance_pts=tune_res["min_distance"],
+                smooth_window_pts=tune_res["smooth_window"]
+            )
+            metrics_df_t = CalciumSignalProcessor.extract_peak_metrics(
+                results_t["t"], y_raw_tune, results_t["y_smooth"], baseline_t, dff0_t, results_t["peaks"], tune_res["dt"]
+            )
+            global_stats_t = CalciumSignalProcessor.compute_global_statistics(metrics_df_t, len(y_raw_tune), tune_res["dt"])
+
+            st.session_state.baseline = baseline_t
+            st.session_state.dff0 = dff0_t
+            st.session_state.results = results_t
+            st.session_state.metrics_df = metrics_df_t
+            st.session_state.global_stats = global_stats_t
+            st.session_state.glossary_df = CalciumSignalProcessor.get_glossary()
+            st.session_state.analyzed_trace_mode = tune_res["trace_mode"]
+            st.session_state.analyzed_detection_method = tune_res["method"]
+            st.session_state.last_analyzed_params = (
+                tune_res["base_method"], tune_res["base_window"], tune_res["trace_mode"],
+                tune_res["method"], tune_res["prominence"], tune_res["min_distance"],
+                tune_res["smooth_window"], tune_res["dt"], st.session_state.current_roi
+            )
+            st.session_state.fig_overview = None
+            st.session_state.fig_overview_bytes = None
+            st.session_state.chart_overview = None
+            st.toast(f"Tuned for {cell_profile}! Noise σ = {tune_res['noise_sigma']:.4f}", icon="🪄")
+            st.rerun()
+
+        if st.session_state.auto_tune_info is not None:
+            inf = st.session_state.auto_tune_info
+            with st.container(border=True):
+                st.markdown(
+                    f"<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; border-bottom:1px solid rgba(128,128,128,0.25); padding-bottom:6px;'>"
+                    f"<span style='font-weight:700; font-size:13.5px; color:#0d9488;'>🎯 Preset: {inf['profile']}</span>"
+                    f"<code style='font-size:12px; padding:2px 6px;'>σ = {inf['noise_sigma']:.4f}</code>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+                col_k1, col_k2 = st.columns(2)
+                with col_k1:
+                    st.markdown(f"**Window:** `{inf['base_window']}f` ({inf['base_window']/inf['fps']:.1f}s)")
+                    st.markdown(f"**Prominence:** `{inf['prominence']:.3f}`")
+                with col_k2:
+                    st.markdown(f"**Min Gap:** `{inf['min_distance']}f` ({inf['min_distance']*1000/inf['fps']:.0f}ms)")
+                    st.markdown(f"**SG Smoothing:** `{inf['smooth_window']}f`")
+
+    # 3. Baseline & Method Expander
     with st.expander("📉 Baseline & Display Mode", expanded=True):
         base_method = st.selectbox(
             "Baseline F0 Method",
             ["Rolling Percentile", "Local Minimum", "Constant Minimum"],
-            index=0
+            key="param_base_method"
         )
-        base_window = st.slider("Baseline Window (frames)", 10, 1000, 400, step=10)
-        trace_mode = st.radio("Display Trace Mode", ["Delta F / F0", "Raw Intensity F(t)"], horizontal=True)
+        base_window = st.slider("Baseline Window (frames)", 10, 1000, step=10, key="param_base_window")
+        trace_mode = st.radio("Display Trace Mode", ["Delta F / F0", "Raw Intensity F(t)"], horizontal=True, key="param_trace_mode")
 
-    # 3. Detection Algorithm & Tuning
+    # 4. Detection Algorithm & Tuning
     with st.expander("⚙️ Detection Algorithm & Parameters", expanded=True):
         method = st.selectbox(
             "Detection Method",
             ["Hybrid (Smooth + Refine)", "Direct (Raw)"],
-            index=0,
+            key="param_method",
             help="Hybrid uses Savitzky-Golay filtering to detect peak locations, then refines on raw signal."
         )
 
         col_p1, col_p2 = st.columns(2)
         with col_p1:
-            prominence = st.number_input("Prominence", min_value=0.001, max_value=1000.0, value=0.10, step=0.005, format="%.3f")
+            prominence = st.number_input("Prominence", min_value=0.001, max_value=1000.0, step=0.005, format="%.3f", key="param_prominence")
         with col_p2:
-            min_distance = st.number_input("Min Dist (frames)", min_value=1, max_value=2000, value=50, step=5)
+            min_distance = st.number_input("Min Dist (frames)", min_value=1, max_value=2000, step=5, key="param_min_distance")
 
         if method == "Hybrid (Smooth + Refine)":
-            smooth_window = st.slider("SG Window (odd)", 5, 51, 11, step=2, help="Savitzky-Golay window size")
+            smooth_window = st.slider("SG Window (odd)", 5, 51, step=2, key="param_smooth_window", help="Savitzky-Golay window size")
         else:
             smooth_window = 11
 
-        dt = st.number_input("Time Step dt (ms/frame)", min_value=0.1, max_value=2000.0, value=10.0, step=1.0, format="%.1f")
+        dt = st.number_input("Time Step dt (ms/frame)", min_value=0.1, max_value=2000.0, step=1.0, format="%.1f", key="param_dt")
 
-    # 4. Visual & Rendering Options
+    # 5. Visual & Rendering Options
     with st.expander("🎨 Display & Themes", expanded=False):
         theme = st.radio("App Palette Theme", ["Light", "Dark"], horizontal=True)
         st.session_state.theme = theme
@@ -828,6 +988,7 @@ with st.sidebar:
         st.session_state.analyzed_detection_method = method
         st.session_state.last_analyzed_params = current_params
         st.session_state.fig_overview = None
+        st.session_state.fig_overview_bytes = None
         st.session_state.chart_overview = None
 
     is_params_changed = (st.session_state.results is not None) and (st.session_state.last_analyzed_params != current_params)
@@ -864,6 +1025,7 @@ with st.sidebar:
             st.session_state.analyzed_detection_method = method
             st.session_state.last_analyzed_params = current_params
             st.session_state.fig_overview = None  # Force figure re-render for new analysis
+            st.session_state.fig_overview_bytes = None
             st.session_state.chart_overview = None
             
         st.toast("Peak Analysis Completed!", icon="✅")
@@ -876,12 +1038,20 @@ with st.sidebar:
             if is_params_changed:
                 st.warning("⚠️ **Pending Parameter Changes:** You modified analysis settings above. Click **🔄 Apply Changed Parameters** to update the analysis before downloading reports.")
             else:
-                df_trace = pd.DataFrame({
-                    "Time (ms)": st.session_state.results["t"],
-                    "Raw Intensity F(t)": st.session_state.y_raw,
-                    "Baseline F0(t)": st.session_state.baseline,
-                    "Delta F / F0": st.session_state.dff0
-                })
+                include_traces = st.checkbox(
+                    "Include raw signal traces sheet in Excel (.xlsx)", 
+                    value=True, 
+                    help="Includes a sheet with frame-by-frame Time, Raw Intensity, Baseline F0, and Delta F/F0. Uncheck to keep the Excel file lightweight."
+                )
+
+                df_trace = None
+                if include_traces:
+                    df_trace = pd.DataFrame({
+                        "Time (ms)": st.session_state.results["t"],
+                        "Raw Intensity F(t)": st.session_state.y_raw,
+                        "Baseline F0(t)": st.session_state.baseline,
+                        "Delta F / F0": st.session_state.dff0
+                    })
 
                 clean_filename = st.session_state.filename or "Calcium_Signal.csv"
                 params_dict = {
@@ -913,8 +1083,7 @@ with st.sidebar:
                     data=excel_bytes,
                     file_name=f"Calcium_Peak_Metrics_{clean_filename}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    width="stretch",
-                    help="Stylized multi-sheet Excel report with analysis parameters, statistics, per-peak kinetics, traces, and glossary."
+                    width="stretch"
                 )
 
                 html_bytes = create_html_report(
@@ -932,8 +1101,7 @@ with st.sidebar:
                     data=html_bytes,
                     file_name=f"Calcium_Report_{clean_filename}.html",
                     mime="text/html",
-                    width="stretch",
-                    help="Interactive standalone scientific report with embedded high-resolution figures. Open in browser to view or print/save as PDF."
+                    width="stretch"
                 )
         else:
             st.info("Upload a CSV file or load sample dataset to unlock report downloads.")
@@ -1112,21 +1280,26 @@ else:
                     )
                     st.session_state.last_rendered_engine = st.session_state.viz_engine
 
-                st.altair_chart(st.session_state.chart_overview, width="stretch")
+                st.altair_chart(st.session_state.chart_overview, width="content")
             else:
-                if (st.session_state.fig_overview is None or 
+                if (st.session_state.fig_overview_bytes is None or 
                     st.session_state.last_rendered_theme != st.session_state.theme or 
                     st.session_state.last_rendered_engine != st.session_state.viz_engine):
                     
-                    st.session_state.fig_overview = plot_matplotlib(
+                    fig = plot_matplotlib(
                         st.session_state.results, st.session_state.dff0, st.session_state.baseline, 
                         st.session_state.analyzed_trace_mode, st.session_state.analyzed_detection_method, st.session_state.theme,
                         current_roi=st.session_state.current_roi or "Signal"
                     )
+                    buf = BytesIO()
+                    fig.savefig(buf, format="png", dpi=140, facecolor=fig.get_facecolor(), edgecolor='none', bbox_inches='tight')
+                    plt.close(fig)
+                    st.session_state.fig_overview_bytes = buf.getvalue()
+                    st.session_state.fig_overview = None  # Free memory
                     st.session_state.last_rendered_theme = st.session_state.theme
                     st.session_state.last_rendered_engine = st.session_state.viz_engine
 
-                st.pyplot(st.session_state.fig_overview, width="stretch")
+                st.image(st.session_state.fig_overview_bytes, width="content")
 
         st.caption("💡 **Tip:** Adjust algorithm parameters in the sidebar and click **Apply Parameter Changes** to update peak locations.")
 
@@ -1235,7 +1408,7 @@ else:
                     df_metrics, selected_peak_id, st.session_state.theme
                 )
                 if fig_insp is not None:
-                    st.pyplot(fig_insp, width="stretch")
+                    st.pyplot(fig_insp, width="content")
                     plt.close(fig_insp)
         else:
             st.info("No detected peaks to inspect.")

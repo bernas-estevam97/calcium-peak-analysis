@@ -55,5 +55,33 @@ def test_processor():
         
     print("\n>>> ALL TESTS PASSED SUCCESSFULLY! <<<")
 
+def test_auto_tune():
+    np.random.seed(123)
+    n = 2000
+    noise_sigma_true = 0.05
+    y_synth = 100.0 + np.random.normal(0, noise_sigma_true, n)
+    # Add spikes
+    y_synth[300:320] += 20.0
+    y_synth[800:820] += 25.0
+    y_synth[1400:1420] += 18.0
+
+    # Test noise estimator
+    sigma_est = CalciumSignalProcessor.estimate_signal_noise(y_synth)
+    print(f"\nTesting noise estimation: True={noise_sigma_true}, Est={sigma_est:.4f}")
+    assert abs(sigma_est - noise_sigma_true) < 0.02, f"Noise estimation error: {sigma_est}"
+
+    # Test auto_tune for various profiles
+    for profile in ["Cardiomyocytes", "Neurons (Fast Transients)", "Astrocytes (Slow Waves)", "Auto-Detect (General)"]:
+        params = CalciumSignalProcessor.auto_tune_parameters(y_synth, fps=100.0, profile=profile)
+        print(f"Profile: {profile} -> Base Win: {params['base_window']}, Prom: {params['prominence']}, Min Dist: {params['min_distance']}, SG Win: {params['smooth_window']}")
+        assert params["base_window"] > 0
+        assert params["prominence"] > 0
+        assert params["min_distance"] > 0
+        assert params["smooth_window"] % 2 == 1
+
+    print(">>> AUTO-TUNE TESTS PASSED SUCCESSFULLY! <<<")
+
 if __name__ == "__main__":
     test_processor()
+    test_auto_tune()
+
