@@ -16,6 +16,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from io import BytesIO
 import altair as alt
+import base64
+from datetime import datetime
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 # Add src folder to python path if needed
 src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
@@ -33,6 +37,38 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# Enable direct mouse selection and copying of all metric labels, values, and cards
+st.markdown("""
+<style>
+[data-testid="stMetricValue"], 
+[data-testid="stMetricLabel"], 
+[data-testid="stMetricDelta"], 
+[data-testid="stMetric"], 
+div[data-testid="stMetric"] * {
+    user-select: text !important;
+    -webkit-user-select: text !important;
+    -moz-user-select: text !important;
+    -ms-user-select: text !important;
+    cursor: text !important;
+}
+
+/* Fix popover body width and scrolling so switching tabs never resizes or closes the popover */
+div[data-testid="stPopoverBody"],
+div[data-testid="stPopoverContent"],
+.stPopoverContent {
+    width: 640px !important;
+    min-width: 640px !important;
+    max-width: 92vw !important;
+}
+div[data-testid="stPopoverBody"] pre,
+div[data-testid="stPopoverContent"] pre,
+.stPopoverContent pre {
+    overflow-x: auto !important;
+    white-space: pre !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────
 # Sample Data Generator
@@ -69,16 +105,374 @@ def generate_sample_data(num_samples=2500, dt=10.0, num_peaks=10, noise_level=4.
     df = pd.DataFrame({"Time_ms": t, "Calcium_Signal": y_raw})
     return df, y_raw
 
-def create_excel_download(df_metrics, global_stats, glossary, df_trace=None):
-    """Create multi-sheet Excel file in memory."""
+def create_excel_download(df_metrics, global_stats, glossary, df_trace=None, params_dict=None):
+    """Create a professionally formatted multi-sheet Excel file with openpyxl styling and audit trail."""
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        # 1. Analysis Parameters & Audit Trail
+        if params_dict:
+            df_params = pd.DataFrame(list(params_dict.items()), columns=["Parameter / Setting", "Configured Value"])
+            df_params.to_excel(writer, sheet_name="Analysis Parameters", index=False)
+
+        # 2. Global Statistics
         pd.DataFrame([global_stats]).to_excel(writer, sheet_name="Global Statistics", index=False)
+
+        # 3. Per-Peak Metrics
         df_metrics.to_excel(writer, sheet_name="Per-Peak Metrics", index=False)
+
+        # 4. Signal Traces
         if df_trace is not None:
             df_trace.to_excel(writer, sheet_name="Signal Traces", index=False)
+
+        # 5. Metrics Glossary
         glossary.to_excel(writer, sheet_name="Metrics Glossary", index=False)
+
+        # Professional openpyxl formatting
+        header_fill = PatternFill(start_color="0F766E", end_color="0F766E", fill_type="solid")
+        header_font = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+        cell_font = Font(name="Segoe UI", size=10)
+        border_thin = Border(
+            left=Side(style='thin', color='CBD5E1'),
+            right=Side(style='thin', color='CBD5E1'),
+            top=Side(style='thin', color='CBD5E1'),
+            bottom=Side(style='thin', color='CBD5E1')
+        )
+
+        for sheet_name in writer.sheets:
+            ws = writer.sheets[sheet_name]
+            try:
+                ws.views.sheetView[0].showGridLines = True
+            except Exception:
+                pass
+            ws.freeze_panes = "A2"
+
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+
+            for col in ws.columns:
+                max_len = 0
+                col_letter = get_column_letter(col[0].column)
+                for cell in col:
+                    if cell.row > 1:
+                        cell.font = cell_font
+                        cell.border = border_thin
+                        if isinstance(cell.value, float):
+                            cell.number_format = "0.000" if abs(cell.value) < 1.0 else "0.00"
+                    val_str = str(cell.value or "")
+                    if len(val_str) > max_len:
+                        max_len = len(val_str)
+                ws.column_dimensions[col_letter].width = max(max_len + 4, 15)
+
     return output.getvalue()
+
+def create_html_report(df_metrics, global_stats, params_dict, results, dff0, baseline, mode, method):
+    """Generate a self-contained, publication-quality scientific HTML report printable to PDF."""
+    # 1. Render Overview Figure to base64
+    fig_overview = plot_matplotlib(results, dff0, baseline, mode, method, "Light", current_roi="Signal")
+    buf_ov = BytesIO()
+    fig_overview.savefig(buf_ov, format="png", dpi=140, bbox_inches="tight")
+    img_ov_b64 = base64.b64encode(buf_ov.getvalue()).decode("utf-8")
+    plt.close(fig_overview)
+
+    # 2. Render 3 Histograms to base64
+    fig_dist, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(11, 3.2), dpi=130)
+    fig_dist.patch.set_facecolor("#ffffff")
+    
+    dff_vals = df_metrics["dF/F0 Peak"].dropna()
+    if len(dff_vals) > 0:
+        ax1.hist(dff_vals, bins=max(5, len(dff_vals)//2), color="#0d9488", edgecolor="white", alpha=0.85)
+    ax1.set_title("Amplitude (dF/F0)", fontsize=10, fontweight="bold", color="#0f172a")
+    ax1.set_xlabel("dF/F0 Peak", fontsize=9)
+    ax1.grid(True, alpha=0.2, linestyle="--")
+
+    rise_vals = df_metrics["Rise Time T10-90 (ms)"].dropna()
+    if len(rise_vals) > 0:
+        ax2.hist(rise_vals, bins=max(5, len(rise_vals)//2), color="#6366f1", edgecolor="white", alpha=0.85)
+    ax2.set_title("Rise Time T10-90 (ms)", fontsize=10, fontweight="bold", color="#0f172a")
+    ax2.set_xlabel("Rise Time (ms)", fontsize=9)
+    ax2.grid(True, alpha=0.2, linestyle="--")
+
+    decay_vals = df_metrics["Decay Tau (ms)"].dropna()
+    if len(decay_vals) > 0:
+        ax3.hist(decay_vals, bins=max(5, len(decay_vals)//2), color="#f59e0b", edgecolor="white", alpha=0.85)
+    ax3.set_title("Decay Tau (ms)", fontsize=10, fontweight="bold", color="#0f172a")
+    ax3.set_xlabel("Decay Tau (ms)", fontsize=9)
+    ax3.grid(True, alpha=0.2, linestyle="--")
+
+    fig_dist.tight_layout()
+    buf_dist = BytesIO()
+    fig_dist.savefig(buf_dist, format="png", dpi=130, bbox_inches="tight")
+    img_dist_b64 = base64.b64encode(buf_dist.getvalue()).decode("utf-8")
+    plt.close(fig_dist)
+
+    # Top peaks table rows (first 15 peaks)
+    top_peaks = df_metrics.head(15)
+    peaks_rows_html = ""
+    for _, row in top_peaks.iterrows():
+        rise_val = f"{row['Rise Time T10-90 (ms)']:.1f}" if pd.notna(row['Rise Time T10-90 (ms)']) else "—"
+        decay_val = f"{row['Decay Time T50 (ms)']:.1f}" if pd.notna(row['Decay Time T50 (ms)']) else "—"
+        tau_val = f"{row['Decay Tau (ms)']:.1f}" if pd.notna(row['Decay Tau (ms)']) else "—"
+        auc_val = f"{row['AUC (dF/F0 * s)']:.4f}" if pd.notna(row['AUC (dF/F0 * s)']) else "—"
+        peaks_rows_html += f"""
+        <tr>
+            <td>#{int(row['Peak_ID'])}</td>
+            <td>{row['Time (ms)']:.1f}</td>
+            <td>{row['Baseline F0']:.2f}</td>
+            <td><strong>{row['dF/F0 Peak']:.4f}</strong></td>
+            <td>{rise_val}</td>
+            <td>{decay_val}</td>
+            <td>{tau_val}</td>
+            <td>{auc_val}</td>
+        </tr>
+        """
+
+    # Parameters table rows
+    params_rows_html = ""
+    if params_dict:
+        for k, v in params_dict.items():
+            params_rows_html += f"<tr><td class='param-name'>{k}</td><td class='param-val'>{v}</td></tr>"
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Calcium Signal Analysis Report - {params_dict.get('Source File', 'Analysis')}</title>
+<style>
+    @page {{
+        size: A4 portrait;
+        margin: 15mm 15mm 15mm 15mm;
+    }}
+    body {{
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        color: #1e293b;
+        background-color: #f8fafc;
+        margin: 0;
+        padding: 20px;
+    }}
+    .report-container {{
+        max-width: 960px;
+        margin: 0 auto;
+        background: #ffffff;
+        padding: 32px 40px;
+        border-radius: 10px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+    }}
+    .header-bar {{
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 2px solid #0f766e;
+        padding-bottom: 16px;
+        margin-bottom: 24px;
+    }}
+    .header-title {{
+        margin: 0;
+        color: #0f766e;
+        font-size: 24px;
+        font-weight: 700;
+    }}
+    .header-subtitle {{
+        color: #64748b;
+        font-size: 13px;
+        margin-top: 4px;
+    }}
+    .print-btn {{
+        background: #0f766e;
+        color: #ffffff;
+        border: none;
+        padding: 10px 18px;
+        border-radius: 6px;
+        font-weight: 600;
+        cursor: pointer;
+        font-size: 13px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        transition: background 0.2s;
+    }}
+    .print-btn:hover {{
+        background: #115e59;
+    }}
+    .kpi-grid {{
+        display: grid;
+        grid-template-columns: repeat(6, 1fr);
+        gap: 12px;
+        margin-bottom: 28px;
+    }}
+    .kpi-card {{
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 12px 10px;
+        text-align: center;
+    }}
+    .kpi-label {{
+        font-size: 11px;
+        color: #64748b;
+        font-weight: 600;
+        text-transform: uppercase;
+        margin-bottom: 6px;
+    }}
+    .kpi-value {{
+        font-size: 17px;
+        font-weight: 700;
+        color: #0f172a;
+    }}
+    .section-title {{
+        font-size: 16px;
+        font-weight: 700;
+        color: #0f172a;
+        margin: 24px 0 12px 0;
+        padding-bottom: 6px;
+        border-bottom: 1px solid #e2e8f0;
+    }}
+    .chart-img {{
+        width: 100%;
+        height: auto;
+        border-radius: 6px;
+        border: 1px solid #e2e8f0;
+        margin-bottom: 20px;
+    }}
+    table {{
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+        margin-bottom: 20px;
+    }}
+    th {{
+        background-color: #0f766e;
+        color: #ffffff;
+        text-align: left;
+        padding: 8px 10px;
+        font-weight: 600;
+    }}
+    td {{
+        padding: 7px 10px;
+        border-bottom: 1px solid #f1f5f9;
+    }}
+    tr:nth-child(even) {{
+        background-color: #f8fafc;
+    }}
+    .param-table {{
+        margin-bottom: 24px;
+    }}
+    .param-name {{
+        font-weight: 600;
+        color: #334155;
+        width: 35%;
+    }}
+    .footer {{
+        margin-top: 32px;
+        border-top: 1px solid #e2e8f0;
+        padding-top: 12px;
+        font-size: 11px;
+        color: #94a3b8;
+        text-align: center;
+    }}
+    @media print {{
+        body {{
+            background: #ffffff;
+            padding: 0;
+        }}
+        .report-container {{
+            box-shadow: none;
+            padding: 0;
+            max-width: 100%;
+        }}
+        .print-btn {{
+            display: none !important;
+        }}
+        .page-break {{
+            page-break-before: always;
+        }}
+    }}
+</style>
+</head>
+<body>
+<div class="report-container">
+    <div class="header-bar">
+        <div>
+            <h1 class="header-title">🔬 Calcium Transient Analysis Report</h1>
+            <div class="header-subtitle">Dataset: <strong>{params_dict.get('Source File', 'Signal')}</strong> | Generated: {params_dict.get('Analysis Date & Time', '')}</div>
+        </div>
+        <button class="print-btn" onclick="window.print()">🖨️ Print / Save as PDF</button>
+    </div>
+
+    <div class="kpi-grid">
+        <div class="kpi-card">
+            <div class="kpi-label">Total Peaks</div>
+            <div class="kpi-value">{global_stats['Total Peaks']}</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">Frequency</div>
+            <div class="kpi-value">{global_stats['Frequency (Hz)']:.2f} Hz</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">Mean dF/F0</div>
+            <div class="kpi-value">{global_stats['Mean Amplitude (dF/F0)']:.2f}</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">Rise T10-90</div>
+            <div class="kpi-value">{global_stats['Mean Rise Time T10-90 (ms)']:.1f} ms</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">Decay Tau (&tau;)</div>
+            <div class="kpi-value">{global_stats['Mean Decay Tau (ms)']:.1f} ms</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">Rhythmicity (CV)</div>
+            <div class="kpi-value">{global_stats['Rhythmicity Index (CV of IEI)']:.3f}</div>
+        </div>
+    </div>
+
+    <div class="section-title">📊 Calcium Transient Detection & Overview</div>
+    <img class="chart-img" src="data:image/png;base64,{img_ov_b64}" alt="Calcium Signal Peak Detection">
+
+    <div class="section-title">📈 Kinetic Parameter Distributions</div>
+    <img class="chart-img" src="data:image/png;base64,{img_dist_b64}" alt="Kinetic Parameter Distributions">
+
+    <div class="section-title">⚙️ Analysis Parameters & Experimental Settings</div>
+    <table class="param-table">
+        <thead>
+            <tr><th>Parameter / Configuration</th><th>Value</th></tr>
+        </thead>
+        <tbody>
+            {params_rows_html}
+        </tbody>
+    </table>
+
+    <div class="section-title">📋 Detected Peaks & Kinetic Metrics (Top 15 Peaks)</div>
+    <table>
+        <thead>
+            <tr>
+                <th>Peak</th>
+                <th>Time (ms)</th>
+                <th>Baseline F0</th>
+                <th>dF/F0 Peak</th>
+                <th>Rise T10-90 (ms)</th>
+                <th>Decay T50 (ms)</th>
+                <th>Decay &tau; (ms)</th>
+                <th>AUC (dF/F0&middot;s)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {peaks_rows_html}
+        </tbody>
+    </table>
+    <div style="font-size: 11px; color: #64748b; margin-top: -12px; margin-bottom: 20px;">
+        *Showing {min(15, len(df_metrics))} of {len(df_metrics)} detected peaks. Complete records are included in the Excel export.
+    </div>
+
+    <div class="footer">
+        Generated by Calcium Signal Peak Analyzer Pro &bull; Standardized &Delta;F/F0 Kinetics &bull; Open in any browser & print/save to PDF via Ctrl+P.
+    </div>
+</div>
+</body>
+</html>
+"""
+    return html_content.encode("utf-8")
 
 # ──────────────────────────────────────────────
 # Visualization Engines (Matplotlib & Altair)
@@ -406,6 +800,36 @@ with st.sidebar:
         st.session_state.viz_engine = viz_engine
 
     current_params = (base_method, base_window, trace_mode, method, prominence, min_distance, smooth_window, dt, st.session_state.current_roi)
+
+    # Automatically run initial analysis upon file upload or sample dataset load
+    # so all KPI cards, charts, and export reports are instantly available on the very first render
+    if st.session_state.y_raw is not None and st.session_state.results is None:
+        y_raw = st.session_state.y_raw
+        baseline = CalciumSignalProcessor.compute_baseline(y_raw, method=base_method, window_pts=base_window)
+        dff0 = CalciumSignalProcessor.compute_dff0(y_raw, baseline)
+        
+        y_analysis = dff0 if trace_mode == "Delta F / F0" else y_raw
+        results = CalciumSignalProcessor.detect_peaks(
+            y_analysis, dt, method=method, prominence=prominence, min_distance_pts=min_distance, smooth_window_pts=smooth_window
+        )
+        
+        metrics_df = CalciumSignalProcessor.extract_peak_metrics(
+            results["t"], y_raw, results["y_smooth"], baseline, dff0, results["peaks"], dt
+        )
+        global_stats = CalciumSignalProcessor.compute_global_statistics(metrics_df, len(y_raw), dt)
+
+        st.session_state.baseline = baseline
+        st.session_state.dff0 = dff0
+        st.session_state.results = results
+        st.session_state.metrics_df = metrics_df
+        st.session_state.global_stats = global_stats
+        st.session_state.glossary_df = CalciumSignalProcessor.get_glossary()
+        st.session_state.analyzed_trace_mode = trace_mode
+        st.session_state.analyzed_detection_method = method
+        st.session_state.last_analyzed_params = current_params
+        st.session_state.fig_overview = None
+        st.session_state.chart_overview = None
+
     is_params_changed = (st.session_state.results is not None) and (st.session_state.last_analyzed_params != current_params)
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -449,36 +873,70 @@ with st.sidebar:
     st.markdown("<br>", unsafe_allow_html=True)
     with st.expander("📥 Export Results & Reports", expanded=st.session_state.metrics_df is not None):
         if st.session_state.metrics_df is not None:
-            df_trace = pd.DataFrame({
-                "Time (ms)": st.session_state.results["t"],
-                "Raw Intensity F(t)": st.session_state.y_raw,
-                "Baseline F0(t)": st.session_state.baseline,
-                "Delta F / F0": st.session_state.dff0
-            })
-            excel_bytes = create_excel_download(
-                st.session_state.metrics_df,
-                st.session_state.global_stats,
-                st.session_state.glossary_df,
-                df_trace=df_trace
-            )
-            st.download_button(
-                label="📥 Download Excel Report (.xlsx)",
-                data=excel_bytes,
-                file_name=f"Calcium_Peak_Metrics_{st.session_state.filename}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                width="stretch"
-            )
-            
-            csv_bytes = st.session_state.metrics_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📄 Download Metrics CSV",
-                data=csv_bytes,
-                file_name="Peak_Metrics.csv",
-                mime="text/csv",
-                width="stretch"
-            )
+            if is_params_changed:
+                st.warning("⚠️ **Pending Parameter Changes:** You modified analysis settings above. Click **🔄 Apply Changed Parameters** to update the analysis before downloading reports.")
+            else:
+                df_trace = pd.DataFrame({
+                    "Time (ms)": st.session_state.results["t"],
+                    "Raw Intensity F(t)": st.session_state.y_raw,
+                    "Baseline F0(t)": st.session_state.baseline,
+                    "Delta F / F0": st.session_state.dff0
+                })
+
+                clean_filename = st.session_state.filename or "Calcium_Signal.csv"
+                params_dict = {
+                    "Analysis Date & Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "Source File": clean_filename,
+                    "Total Samples": len(st.session_state.y_raw) if st.session_state.y_raw is not None else 0,
+                    "Time Step dt (ms)": dt,
+                    "Sampling Rate (FPS)": round(1000.0 / dt, 2) if dt > 0 else 0,
+                    "Baseline Method": base_method,
+                    "Baseline Window (frames)": base_window,
+                    "Baseline Window (ms)": round(base_window * dt, 1),
+                    "Display Trace Mode": trace_mode,
+                    "Peak Detection Method": method,
+                    "Prominence Threshold": prominence,
+                    "Min Distance (frames)": min_distance,
+                    "Min Distance (ms)": round(min_distance * dt, 1),
+                    "Savitzky-Golay Window (pts)": smooth_window if method.startswith("Hybrid") else "N/A"
+                }
+
+                excel_bytes = create_excel_download(
+                    st.session_state.metrics_df,
+                    st.session_state.global_stats,
+                    st.session_state.glossary_df,
+                    df_trace=df_trace,
+                    params_dict=params_dict
+                )
+                st.download_button(
+                    label="📥 Download Excel Report (.xlsx)",
+                    data=excel_bytes,
+                    file_name=f"Calcium_Peak_Metrics_{clean_filename}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    width="stretch",
+                    help="Stylized multi-sheet Excel report with analysis parameters, statistics, per-peak kinetics, traces, and glossary."
+                )
+
+                html_bytes = create_html_report(
+                    st.session_state.metrics_df,
+                    st.session_state.global_stats,
+                    params_dict,
+                    st.session_state.results,
+                    st.session_state.dff0,
+                    st.session_state.baseline,
+                    st.session_state.analyzed_trace_mode,
+                    st.session_state.analyzed_detection_method
+                )
+                st.download_button(
+                    label="📄 Download Visual Report (.html / PDF)",
+                    data=html_bytes,
+                    file_name=f"Calcium_Report_{clean_filename}.html",
+                    mime="text/html",
+                    width="stretch",
+                    help="Interactive standalone scientific report with embedded high-resolution figures. Open in browser to view or print/save as PDF."
+                )
         else:
-            st.info("Run analysis to unlock report downloads.")
+            st.info("Upload a CSV file or load sample dataset to unlock report downloads.")
 
 # ──────────────────────────────────────────────
 # Main Application Dashboard
@@ -542,6 +1000,76 @@ else:
 
     gs = st.session_state.global_stats
     if gs is not None:
+        current_file = st.session_state.filename or "Calcium_Signal"
+        #current_roi = st.session_state.current_roi or "ROI"
+
+        stats_kv_text = (
+            f"--- Calcium Signal Global Statistics ---\n"
+            f"File: {current_file}\n"
+            f"Total Peaks: {gs['Total Peaks']}\n"
+            f"Total Duration: {gs['Total Duration (s)']} s\n"
+            f"Frequency: {gs['Frequency (Hz)']:.3f} Hz ({gs.get('Frequency (events/min)', 0):.2f} events/min)\n"
+            f"Mean Amplitude (dF/F0): {gs['Mean Amplitude (dF/F0)']:.4f}\n"
+            f"Mean Rise Time T10-90: {gs['Mean Rise Time T10-90 (ms)']:.2f} ms\n"
+            f"Mean Decay T50: {gs.get('Mean Decay T50 (ms)', 0):.2f} ms\n"
+            f"Mean Decay Tau: {gs['Mean Decay Tau (ms)']:.2f} ms\n"
+            f"Mean Inter-Event Interval: {gs.get('Mean Inter-Event Interval (ms)', 0):.2f} ms\n"
+            f"Median Inter-Event Interval: {gs.get('Median Inter-Event Interval (ms)', 0):.2f} ms\n"
+            f"Rhythmicity (SD of IEI): {gs.get('Rhythmicity (SD of IEI ms)', 0):.2f} ms\n"
+            f"Rhythmicity Index (CV of IEI): {gs['Rhythmicity Index (CV of IEI)']:.4f}"
+        )
+
+        stats_tsv_row_with_header = (
+            "File\tTotal Peaks\tDuration (s)\tFrequency (Hz)\tFrequency (BPM)\tMean dF/F0\tMean Rise T10-90 (ms)\tMean Decay T50 (ms)\tMean Decay Tau (ms)\tMean IEI (ms)\tMedian IEI (ms)\tSD IEI (ms)\tCV IEI\n"
+            f"{current_file}\t{gs['Total Peaks']}\t{gs['Total Duration (s)']}\t{gs['Frequency (Hz)']:.3f}\t{gs.get('Frequency (events/min)', 0):.2f}\t"
+            f"{gs['Mean Amplitude (dF/F0)']:.4f}\t{gs['Mean Rise Time T10-90 (ms)']:.2f}\t{gs.get('Mean Decay T50 (ms)', 0):.2f}\t"
+            f"{gs['Mean Decay Tau (ms)']:.2f}\t{gs.get('Mean Inter-Event Interval (ms)', 0):.2f}\t{gs.get('Median Inter-Event Interval (ms)', 0):.2f}\t"
+            f"{gs.get('Rhythmicity (SD of IEI ms)', 0):.2f}\t{gs['Rhythmicity Index (CV of IEI)']:.4f}"
+        )
+
+        stats_tsv_row_no_header = (
+            f"{current_file}\t{gs['Total Peaks']}\t{gs['Total Duration (s)']}\t{gs['Frequency (Hz)']:.3f}\t{gs.get('Frequency (events/min)', 0):.2f}\t"
+            f"{gs['Mean Amplitude (dF/F0)']:.4f}\t{gs['Mean Rise Time T10-90 (ms)']:.2f}\t{gs.get('Mean Decay T50 (ms)', 0):.2f}\t"
+            f"{gs['Mean Decay Tau (ms)']:.2f}\t{gs.get('Mean Inter-Event Interval (ms)', 0):.2f}\t{gs.get('Median Inter-Event Interval (ms)', 0):.2f}\t"
+            f"{gs.get('Rhythmicity (SD of IEI ms)', 0):.2f}\t{gs['Rhythmicity Index (CV of IEI)']:.4f}"
+        )
+
+        stats_tsv_table = (
+            f"Metric\tValue\n"
+            f"Total Peaks (count)\t{gs['Total Peaks']}\n"
+            f"Total Duration (s)\t{gs['Total Duration (s)']}\n"
+            f"Frequency (Hz)\t{gs['Frequency (Hz)']:.3f}\n"
+            f"Frequency (events/min)\t{gs.get('Frequency (events/min)', 0):.2f}\n"
+            f"Mean Amplitude (dF/F0)\t{gs['Mean Amplitude (dF/F0)']:.4f}\n"
+            f"Mean Rise Time T10-90 (ms)\t{gs['Mean Rise Time T10-90 (ms)']:.2f}\n"
+            f"Mean Decay T50 (ms)\t{gs.get('Mean Decay T50 (ms)', 0):.2f}\n"
+            f"Mean Decay Tau (ms)\t{gs['Mean Decay Tau (ms)']:.2f}\n"
+            f"Mean Inter-Event Interval (ms)\t{gs.get('Mean Inter-Event Interval (ms)', 0):.2f}\n"
+            f"Median Inter-Event Interval (ms)\t{gs.get('Median Inter-Event Interval (ms)', 0):.2f}\n"
+            f"Rhythmicity (SD of IEI) (ms)\t{gs.get('Rhythmicity (SD of IEI ms)', 0):.2f}\n"
+            f"Rhythmicity Index (CV of IEI) (ratio)\t{gs['Rhythmicity Index (CV of IEI)']:.4f}"
+        )
+
+        kpi_h1, kpi_h2 = st.columns([5, 1])
+        with kpi_h1:
+            st.markdown("#### 📊 Global Signal Statistics")
+        with kpi_h2:
+            with st.popover("📋 Copy Stats", width="stretch"):
+                st.markdown("##### 📋 Copy Global Statistics")
+                st.caption("Hover over any code box below and click the **copy icon** in the top-right corner:")
+                tab_c1, tab_c2, tab_c3 = st.tabs(["📝 Text Summary", "📑 Excel Row", "📊 Excel Table"])
+                with tab_c1:
+                    st.caption("Plain text summary for reports, papers, or lab notebooks:")
+                    st.code(stats_kv_text, language="text")
+                with tab_c2:
+                    st.markdown("**With Column Headers** *(for a new table / first row)*:")
+                    st.code(stats_tsv_row_with_header, language="text")
+                    st.markdown("**Without Headers — Values Only** *(paste as an additional row)*:")
+                    st.code(stats_tsv_row_no_header, language="text")
+                with tab_c3:
+                    st.caption("Paste directly as 2 columns (Metric | Value):")
+                    st.code(stats_tsv_table, language="text")
+
         kpi_cols = st.columns(6)
         with kpi_cols[0]:
             with st.container(border=True):
